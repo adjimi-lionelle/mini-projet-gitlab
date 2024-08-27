@@ -29,6 +29,8 @@ Notre pipeline comprend deux grandes parties à savoir:
 Avant de passer à la configuration de notre pipeline, nous allons d'abord créer le fichier Dockerfile, qui contiendra les instructions nécessaires pour construire notre image Docker.
 
 ![image-2](images/resultats/image-2.png)
+file:///home/adjimi/Documents/DevOps/images/image1.png
+
 
 
 ## I- CI pipeline
@@ -54,7 +56,7 @@ Cette étape prépare les artifacts finaux pour le déploiement
 ![image-5](images/resultats/image-5.png)
 
 
-## II- CI pipeline
+## II- CD pipeline
 Cette partie est constituée des étapes suivantes:
 
 - Review 
