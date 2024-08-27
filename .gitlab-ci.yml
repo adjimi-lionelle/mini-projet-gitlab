@@ -1,0 +1,172 @@
+image: docker:latest
+services:
+  - name: docker:dind
+    alias: docker
+variables:
+  APK_CACHE_DIR: $CI_PROJECT_DIR/.cache/apk
+
+
+stages:
+  - build
+  - Test image
+  - Release
+  - Deploy review
+  - Stop review
+  - Deploy staging
+  - Deploy prod
+
+
+.before_script_ssh: &setup_ssh
+  before_script:
+    - mkdir -p $APK_CACHE_DIR
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "${SSH_KEY}" > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - touch ~/.ssh/known_hosts
+    - ssh-keyscan -H -t rsa ${HOSTNAME_DEPLOY} >> ~/.ssh/known_hosts
+    - ssh -T ${SSH_USER}@${HOSTNAME_DEPLOY} "echo Connection established"
+  cache:
+    key: cache
+    paths:
+      - $APK_CACHE_DIR
+   
+
+.deploy_template: &deploy
+  interruptible: false
+  script:
+    - command1="docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY"
+    - command2="docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+    - command3="docker rm -f staticwebapp || echo 'No container to remove'"
+    - command4="docker run -d -p 80:80 --name staticwebapp $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME || (echo \"Feature already exist on this environment!\" && exit 125)"
+    - ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY}
+      -o SendEnv=CI_REGISTRY_IMAGE
+      -o SendEnv=CI_COMMIT_REF_SLUG
+      -o SendEnv=CI_REGISTRY_USER
+      -o SendEnv=CI_REGISTRY_PASSWORD
+      -o SendEnv=CI_REGISTRY
+      -C "$command1 && $command2 && $command3 && $command4"    
+
+
+.fact_deploy: &fact_deploy
+  variables:
+    GIT_STRATEGY: none
+  only:
+   - master
+  <<: *setup_ssh
+  <<: *deploy
+  dependencies: []
+
+ 
+docker-build:
+  stage: build
+  rules:
+    - if: $CI_OPEN_MERGE_REQUESTS || $CI_COMMIT_REF_SLUG
+  script:
+     - docker build -t static-website .
+     - docker save static-website > static-website.tar 
+  artifacts:
+      paths:
+          - static-website.tar 
+
+
+test-image:
+  stage: Test image
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - docker load < static-website.tar
+    - docker run --rm static-website sh -c "apk add --no-cache curl && if [ $(curl -s -o /dev/null -w '%{http_code}' http://localhost) -ne 200 ]; then echo 'Test failed!'; exit 1; fi"
+  cache:
+    key: cache-apk
+    paths:
+      - $APK_CACHE_DIR
+      
+
+release image:
+  stage: Release
+  variables:
+    GIT_STRATEGY: none
+  only: 
+    - master
+    - merge_requests
+  script:
+    - docker load < static-website.tar
+    - docker tag static-website "${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_NAME}"
+    - docker tag static-website "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" $CI_REGISTRY
+    - docker push "${CI_REGISTRY_IMAGE}:${CI_COMMIT_REF_NAME}"
+    - docker push "${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+
+
+deploy review:
+  stage: Deploy review
+  variables:
+    GIT_STRATEGY: none
+  environment:
+    name: review/$CI_COMMIT_REF_NAME
+    url: http://${HOSTNAME_DEPLOY}
+    on_stop: stop review
+  only:
+    - merge_requests
+  <<: *setup_ssh  
+  script:
+    - ssh-keyscan -t rsa ${HOSTNAME_DEPLOY} >> ~/.ssh/known_hosts 
+    - command1="docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY"
+    - command2="docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
+    - command3="docker rm -f staticwebapp || echo 'No container to remove'"
+    - command4="docker run -d -p 80:80 --name staticwebapp $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME || (echo \"Feature already exist on this environment!\" && exit 125)"
+    - ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY}
+      -o SendEnv=CI_REGISTRY_IMAGE
+      -o SendEnv=CI_COMMIT_REF_NAME
+      -C "$command1 && $command2 && $command3 && $command4 "
+  dependencies: []    
+
+
+stop review:
+  stage: Stop review
+  variables:
+    GIT_STRATEGY: none
+  environment:
+    name: review/$CI_COMMIT_REF_NAME
+    action: stop
+  only:
+    - merge_requests
+  when: manual
+  <<: *setup_ssh
+  script:
+    - ssh-keyscan -t rsa ${HOSTNAME_DEPLOY} >> ~/.ssh/known_hosts  
+    - command1="docker rm -Vf staticwebapp"
+    - command2="docker rmi staticwebapp $CI_REGISTRY_IMAGE:$CI_COMMIT_REF_NAME"
+    - ssh -t ${SSH_USER}@${HOSTNAME_DEPLOY}
+      -o SendEnv=CI_REGISTRY_IMAGE
+      -o SendEnv=CI_COMMIT_REF_NAME
+      -C "$command1 && $command2"
+  dependencies: []    
+
+
+deploy staging:
+  stage: Deploy staging
+  variables:
+    GIT_STRATEGY: none
+  only:
+   - master
+  environment:
+    name: staging
+    url: http://${HOSTNAME_DEPLOY}
+  <<: *fact_deploy
+
+
+deploy prod:
+  stage: Deploy prod
+  variables:
+    GIT_STRATEGY: none
+  only:
+   - master
+  environment:
+    name: prod
+    url: https://${HOSTNAME_DEPLOY}
+  <<: *fact_deploy  
+ 
